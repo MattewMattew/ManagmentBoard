@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # === Бэкенд на Node.js с Express ===
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: express-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - DB_HOST=mysql
+      - DB_USER=root
+      - DB_PASSWORD=root
+      - DB_NAME=redmine_board
+    depends_on:
+      - mysql
+    restart: on-failure:5  # перезапуск при ошибке
+
+  # === MySQL ===
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: redmine_board
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: always
+
+  # === Nginx для фронтенда ===
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vue-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
