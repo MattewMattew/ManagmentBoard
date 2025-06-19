@@ -1,9 +1,7 @@
 @import './base.css';
 
 #app {
-  max-width: 1280px;
   margin: 0 auto;
-  padding: 2rem;
   font-weight: normal;
 }
 
@@ -23,11 +21,55 @@ a,
 
 @media (min-width: 1024px) {
   body {
-    display: flex;
     place-items: center;
   }
+}
 
-  #app {
-    padding: 0 2rem;
-  }
+.dashboard.dark {
+  background: #2c3e50;
+  color: #ecf0f1;
+}
+
+.dashboard.dark .sidebar {
+  background: #34495e;
+}
+
+.dashboard.dark .sidebar a {
+  color: #ecf0f1;
+}
+
+.dashboard.dark .sidebar a:hover {
+  background: #2c3e50;
+}
+
+.dashboard.dark .main-content {
+  background: #2c3e50;
+}
+
+.dashboard.dark .dashboard-header h1 {
+  color: #ecf0f1;
+}
+
+.dashboard.dark .modal-content {
+  background: #34495e;
+  color: #ecf0f1;
+}
+
+.dashboard.dark .modal-close {
+  color: #ecf0f1;
+}
+
+.theme-toggle {
+  margin-top: 20px;
+  padding: 10px 15px;
+  background: #3498db;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.theme-toggle:hover {
+  background: #2980b9;
 }

@@ -1,7 +1,23 @@
 version: '3.8'
 
 services:
-  # === Бэкенд на Node.js с Express ===
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: redmine_board
+      MYSQL_ROOT_HOST: '%'  # Разрешаем подключение с любого хоста
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: always
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
   backend:
     build:
       context: ./backend
@@ -10,28 +26,18 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - DB_HOST=mysql
-      - DB_USER=root
-      - DB_PASSWORD=root
-      - DB_NAME=redmine_board
+      DB_HOST: mysql  # Используем имя сервиса как хост
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_NAME: redmine_board
+      DB_PORT: 3306
+      REDMINE_URL: https://helpdesk.fenix-it.ru/
+      TRACKER_URL: https://tracker.fenix-it.ru/
     depends_on:
-      - mysql
-    restart: on-failure:5  # перезапуск при ошибке
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
 
-  # === MySQL ===
-  mysql:
-    image: mysql:8.0
-    container_name: mysql
-    environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: redmine_board
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-    restart: always
-
-  # === Nginx для фронтенда ===
   nginx:
     build:
       context: .
@@ -41,6 +47,7 @@ services:
       - "8080:80"
     depends_on:
       - backend
+    restart: unless-stopped
 
 volumes:
   mysql_data:

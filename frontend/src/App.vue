@@ -1,350 +1,992 @@
 <template>
-  <div class="app">
-    <header class="header">
-      <div class="header-content">
-        <h1><span class="icon">📋</span> Доска задач</h1>
-        <p class="task-counter">Всего задач: <span class="task-count">{{ tasks.length }}</span></p>
+  <div :class="['dashboard', { dark: isDarkMode }]">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h2 :class="{ dark: isDarkMode }">Меню</h2>
+        <button 
+          @click="toggleTheme" 
+          :class="['theme-toggle', isDarkMode ? 'dark' : 'light']">
+          {{ isDarkMode ? 'Светлая тема' : 'Тёмная тема' }}
+        </button>
       </div>
-    </header>
-
-    <main class="content">
-      <div class="task-form-container">
-        <div class="task-form">
-          <input
-            v-model="newTask"
-            @keyup.enter="addTask"
-            placeholder="Что нужно сделать?"
-            class="task-input"
-          />
-          <button @click="addTask" class="btn btn-add">
-            <span class="btn-text">Добавить</span>
-            <span class="btn-icon">➕</span>
-          </button>
+      <ul>
+        <li><a href="#" @click.prevent="switchTab('charts')">Графики</a></li>
+        <li><a href="#" @click.prevent="switchTab('reports')">Отчёты</a></li>
+        <li><a href="#" @click.prevent="switchTab('settings')">Настройки</a></li>
+      </ul>
+    </aside>
+    <main class="main-content">
+      <header class="dashboard-header">
+        <h1 v-if="currentTab === 'charts'">График поступления задач</h1>
+        <h1 v-if="currentTab === 'reports'">Отчёты</h1>
+        <h1 v-if="currentTab === 'settings'">Настройки</h1>
+      </header>
+      <div v-if="isLoading" class="loading">
+        <p>Загрузка данных...</p>
+      </div>
+      <!-- Графики отображаются только на вкладке "Графики" -->
+      <section v-if="currentTab === 'charts'" class="block">
+        <div class="chart-container">
+          <canvas ref="issuesChart"></canvas>
+        </div>
+        <div class="chart-container">
+          <canvas ref="closedChart"></canvas>
+        </div>
+        <div class="chart-container">
+          <canvas ref="inProgressChart"></canvas>
+        </div>
+      </section>
+      <!-- Вкладка "Настройки" -->
+      <section v-if="currentTab === 'settings'" class="block">
+        <Settings :isDarkMode="isDarkMode" :toggleTheme="toggleTheme" />
+      </section>
+      <!-- Модальное окно -->
+      <div v-if="selectedWeek" class="modal" @click.self="closeModal">
+        <div class="modal-content">
+          <button class="modal-close" @click="closeModal">&times;</button>
+          <h2>Детальная информация о неделе: {{ selectedWeek }}</h2>
+          <ul>
+            <li v-for="(count, project) in weeklyDetails[selectedWeek]" :key="project">
+              {{ project }}: {{ count }} задач
+            </li>
+          </ul>
         </div>
       </div>
-
-      <div class="tasks-container">
-        <transition-group name="task-list" tag="div">
-          <div v-for="task in tasks" :key="task.id" class="task-card">
-            <div class="task-content">
-              <span class="task-text">{{ task.title }}</span>
-              <button @click="deleteTask(task.id)" class="btn btn-delete">
-                <span class="btn-icon">🗑️</span>
-                <span class="btn-text">Удалить</span>
-              </button>
-            </div>
-          </div>
-        </transition-group>
-
-        <div v-if="!tasks.length" class="no-tasks">
-          <div class="empty-state">
-            <div class="empty-icon">📭</div>
-            <h3>Нет задач</h3>
-            <p>Добавьте свою первую задачу!</p>
-          </div>
-        </div>
+      <div
+        v-if="overlayVisible"
+        :class="['loader-overlay', { hidden: !isUpdating }]"
+        @animationend="handleAnimationEnd"
+      >
+        <div class="loader"></div>
       </div>
     </main>
   </div>
 </template>
 
 <script>
+import { defineComponent, ref, onMounted, onUnmounted } from 'vue';
 import axios from 'axios';
+import moment from 'moment';
+import Settings from './components/Settings.vue'; // Добавляем компонент "Настройки"
+import {
+  Chart,
+  BarController,
+  BarElement,
+  CategoryScale,
+  LinearScale,
+  Title,
+  Tooltip,
+  Legend,
+  LineController,
+  LineElement,
+  PointElement,
+} from 'chart.js';
 
-export default {
-  data() {
+Chart.register(
+  BarController,
+  BarElement,
+  CategoryScale,
+  LinearScale,
+  Title,
+  Tooltip,
+  Legend,
+  LineController,
+  LineElement,
+  PointElement
+);
+
+export default defineComponent({
+  name: 'App',
+  components: {
+    Settings, // Регистрируем компонент "Настройки"
+  },
+  setup() {
+    const currentTab = ref('charts'); // Добавляем состояние для текущей вкладки
+    const isLoading = ref(true);
+    const issuesChart = ref(null);
+    const closedChart = ref(null);
+    const inProgressChart = ref(null);
+    const chartInstance = ref(null);
+    const closedChartInstance = ref(null);
+    const inProgressChartInstance = ref(null);
+    const selectedWeek = ref(null);
+    const weeklyDetails = ref({});
+    const isDarkMode = ref(false);
+    const isUpdating = ref(false); // Новое состояние для лоадера
+    const overlayVisible = ref(false); // Новое состояние для управления видимостью оверлея
+
+    const getTextColor = () => (isDarkMode.value ? '#ecf0f1' : '#333');
+
+    const drawSumAboveBar = (chart) => {
+      const { ctx, data, scales } = chart;
+      ctx.save();
+      ctx.font = '14px Arial';
+      ctx.textAlign = 'center';
+
+      // Используем функцию для получения цвета текста в зависимости от темы
+      ctx.fillStyle = getTextColor();
+
+      data.labels.forEach((label, i) => {
+        let sum = 0;
+        let topY = null;
+
+        // Ищем самый верхний видимый сегмент столбца
+        for (let d = data.datasets.length - 1; d >= 0; d--) {
+          const ds = data.datasets[d];
+          const meta = chart.getDatasetMeta(d);
+
+          // Исключаем кривую закрытых тикетов
+          if (meta && meta.data[i] && !meta.hidden && ds.label !== 'Закрытые тикеты') {
+            sum += ds.data[i] || 0;
+            if (topY === null) {
+              topY = meta.data[i].y;
+            }
+          }
+        }
+
+        if (topY !== null) {
+          ctx.fillText(sum, scales.x.getPixelForValue(i), topY - 8);
+        }
+      });
+
+      ctx.restore();
+    };
+
+    const fetchData = async () => {
+      try {
+        isUpdating.value = true; // Включаем лоадер
+        overlayVisible.value = true; // Делаем оверлей видимым
+
+        const response = await axios.get('http://localhost:5000/issues');
+        if (!response.data || !Array.isArray(response.data)) {
+          throw new Error('Некорректный формат данных');
+        }
+        const issues = response.data;
+
+        // Группировка по неделям (создано)
+        const weeklyData = {};
+        // Группировка по неделям (закрыто)
+        const closedWeeklyData = {};
+        // Группировка по неделям (в работе)
+        const inProgressWeeklyData = {};
+        // Данные для кривой закрытых тикетов
+        const closedCurveData = {};
+
+        issues.forEach((issue) => {
+          const createdOn = issue.data?.created_on;
+          const closedOn = issue.data?.closed_on;
+          const projectName = issue.data?.project?.name;
+          const statusName = issue.data?.status?.name;
+
+          // График поступления задач
+          if (createdOn && projectName) {
+            const week = moment(createdOn).startOf('isoWeek').format('YYYY-MM-DD');
+            if (!weeklyData[week]) {
+              weeklyData[week] = {};
+            }
+            weeklyData[week][projectName] = (weeklyData[week][projectName] || 0) + 1;
+          }
+
+          // График закрытых задач
+          if (closedOn && projectName) {
+            const closedWeek = moment(closedOn).startOf('isoWeek').format('YYYY-MM-DD');
+            if (!closedWeeklyData[closedWeek]) {
+              closedWeeklyData[closedWeek] = {};
+            }
+            closedWeeklyData[closedWeek][projectName] = (closedWeeklyData[closedWeek][projectName] || 0) + 1;
+
+            // Данные для кривой закрытых тикетов
+            closedCurveData[closedWeek] = (closedCurveData[closedWeek] || 0) + 1;
+          }
+
+          // График "В работе инженера сопровождения"
+          if (
+            statusName === 'В работе инженера сопровождения' &&
+            projectName &&
+            createdOn
+          ) {
+            const week = moment(createdOn).startOf('isoWeek').format('YYYY-MM-DD');
+            if (!inProgressWeeklyData[week]) {
+              inProgressWeeklyData[week] = {};
+            }
+            inProgressWeeklyData[week][projectName] = (inProgressWeeklyData[week][projectName] || 0) + 1;
+          }
+        });
+
+        weeklyDetails.value = weeklyData;
+
+        // Для всех графиков — общий список недель и проектов
+        let allWeeks = Array.from(
+          new Set([
+            ...Object.keys(weeklyData),
+            ...Object.keys(closedWeeklyData),
+            ...Object.keys(inProgressWeeklyData),
+            ...Object.keys(closedCurveData),
+          ])
+        ).sort((a, b) => new Date(a) - new Date(b));
+
+        // Оставляем только последние 30 недель
+        if (allWeeks.length > 30) {
+          allWeeks = allWeeks.slice(-30);
+        }
+        const labels = allWeeks;
+
+        const projectNames = new Set();
+        [weeklyData, closedWeeklyData, inProgressWeeklyData].forEach((data) => {
+          Object.values(data).forEach((weekData) => {
+            Object.keys(weekData).forEach((projectName) => {
+              projectNames.add(projectName);
+            });
+          });
+        });
+
+        // Дatasets для поступления задач
+        const datasets = Array.from(projectNames).map((projectName) => {
+          const data = labels.map((week) => weeklyData[week]?.[projectName] || 0);
+          return {
+            label: projectName,
+            data,
+            backgroundColor: getProjectColor(projectName),
+          };
+        });
+
+        // Дatasets для закрытых задач
+        const closedDatasets = Array.from(projectNames).map((projectName) => {
+          const data = labels.map((week) => closedWeeklyData[week]?.[projectName] || 0);
+          return {
+            label: projectName,
+            data,
+            backgroundColor: getProjectColor(projectName),
+          };
+        });
+
+        // Дatasets для "В работе инженера сопровождения" (столбцы)
+        const inProgressDatasets = Array.from(projectNames).map((projectName) => {
+          const data = labels.map((week) => inProgressWeeklyData[week]?.[projectName] || 0);
+          return {
+            label: projectName,
+            data,
+            backgroundColor: getProjectColor(projectName),
+            stack: 'inProgress',
+          };
+        });
+
+        // Данные для кривой закрытых тикетов
+        const closedCurveDataset = {
+          label: 'Закрытые тикеты',
+          data: labels.map((week) => closedCurveData[week] || 0),
+          borderColor: 'rgba(255, 99, 132, 1)',
+          backgroundColor: 'rgba(255, 99, 132, 0.2)',
+          type: 'line',
+          fill: false,
+          tension: 0.4,
+        };
+
+        // Функция для вывода суммы над столбцом
+        const drawSumAboveBar = (chart) => {
+          const { ctx, data, scales } = chart;
+          ctx.save();
+          ctx.font = '14px Arial';
+          ctx.textAlign = 'center';
+
+          // Используем функцию для получения цвета текста в зависимости от темы
+          ctx.fillStyle = getTextColor();
+
+          data.labels.forEach((label, i) => {
+            let sum = 0;
+            let topY = null;
+
+            // Ищем самый верхний видимый сегмент столбца
+            for (let d = data.datasets.length - 1; d >= 0; d--) {
+              const ds = data.datasets[d];
+              const meta = chart.getDatasetMeta(d);
+
+              // Исключаем кривую закрытых тикетов по её индексу или другим характеристикам
+              if (meta && meta.data[i] && !meta.hidden && ds.label !== 'Закрытые тикеты') {
+                sum += ds.data[i] || 0;
+                if (topY === null) {
+                  topY = meta.data[i].y;
+                }
+              }
+            }
+
+            if (topY !== null) {
+              ctx.fillText(sum, scales.x.getPixelForValue(i), topY - 8);
+            }
+          });
+
+          ctx.restore();
+        };
+
+        // Первый график (поступление + кривая закрытых тикетов)
+        const ctx = issuesChart.value?.getContext('2d');
+        if (ctx) {
+          if (chartInstance.value) chartInstance.value.destroy();
+          chartInstance.value = new Chart(ctx, {
+            type: 'bar',
+            data: {
+              labels,
+              datasets: [...datasets, closedCurveDataset],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                title: {
+                  display: true,
+                  text: 'Поступление задач по неделям и проектам',
+                  font: {
+                    weight: 'bold',
+                  },
+                  color: getTextColor(),
+                },
+                legend: {
+                  position: 'top',
+                  labels: {
+                    color: getTextColor(),
+                  },
+                },
+                tooltip: {
+                  enabled: true,
+                  backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                  titleFont: {
+                    size: 14,
+                    weight: 'bold',
+                    color: getTextColor(),
+                  },
+                  bodyFont: {
+                    size: 12,
+                    color: getTextColor(),
+                  },
+                },
+              },
+              scales: {
+                x: {
+                  stacked: true,
+                  title: {
+                    display: false,
+                  },
+                  ticks: {
+                    color: getTextColor(),
+                  },
+                },
+                y: {
+                  stacked: true,
+                  beginAtZero: true,
+                  grace: '20%',
+                  title: {
+                    display: false,
+                  },
+                  ticks: {
+                    color: getTextColor(),
+                  },
+                },
+              },
+              animation: {
+                duration: 1000,
+                easing: 'easeOutBounce',
+              },
+              onClick: (event, elements) => {
+                if (elements.length > 0) {
+                  const index = elements[0].index;
+                  const week = labels[index];
+                  selectedWeek.value = week;
+                }
+              },
+            },
+            plugins: [{
+              afterDatasetsDraw: drawSumAboveBar
+            }]
+          });
+        }
+
+        // Второй график (закрытые)
+        const closedCtx = closedChart.value?.getContext('2d');
+        if (closedCtx) {
+          if (closedChartInstance.value) closedChartInstance.value.destroy();
+          closedChartInstance.value = new Chart(closedCtx, {
+            type: 'bar',
+            data: {
+              labels,
+              datasets: closedDatasets,
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                title: {
+                  display: true,
+                  text: 'Закрытые задачи по неделям и проектам',
+                  font: {
+                    weight: 'bold',
+                  },
+                  color: getTextColor(),
+                },
+                legend: {
+                  position: 'top',
+                  labels: {
+                    color: getTextColor(),
+                  },
+                },
+                tooltip: {
+                  enabled: true,
+                  backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                  titleFont: {
+                    size: 14,
+                    weight: 'bold',
+                    color: getTextColor(),
+                  },
+                  bodyFont: {
+                    size: 12,
+                    color: getTextColor(),
+                  },
+                },
+              },
+              scales: {
+                x: {
+                  stacked: true,
+                  title: {
+                    display: false,
+                  },
+                  ticks: {
+                    color: getTextColor(),
+                  },
+                },
+                y: {
+                  stacked: true,
+                  beginAtZero: true,
+                  grace: '20%',
+                  title: {
+                    display: false,
+                  },
+                  ticks: {
+                    color: getTextColor(),
+                  },
+                },
+              },
+              animation: {
+                duration: 1000,
+                easing: 'easeOutBounce',
+              },
+            },
+            plugins: [{
+              afterDatasetsDraw: drawSumAboveBar
+            }]
+          });
+        }
+
+        // Третий график ("В работе инженера сопровождения")
+        const inProgressCtx = inProgressChart.value?.getContext('2d');
+        if (inProgressCtx) {
+          if (inProgressChartInstance.value) inProgressChartInstance.value.destroy();
+          inProgressChartInstance.value = new Chart(inProgressCtx, {
+            type: 'bar',
+            data: {
+              labels,
+              datasets: inProgressDatasets,
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                title: {
+                  display: true,
+                  text: 'Динамика тикетов "В работе инженера сопровождения" по неделям',
+                  font: {
+                    weight: 'bold',
+                  },
+                  color: getTextColor(),
+                },
+                legend: {
+                  position: 'top',
+                  labels: {
+                    color: getTextColor(),
+                  },
+                },
+                tooltip: {
+                  enabled: true,
+                  backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                  titleFont: {
+                    size: 14,
+                    weight: 'bold',
+                    color: getTextColor(),
+                  },
+                  bodyFont: {
+                    size: 12,
+                    color: getTextColor(),
+                  },
+                },
+              },
+              scales: {
+                x: {
+                  stacked: true,
+                  title: {
+                    display: false,
+                  },
+                  ticks: {
+                    color: getTextColor(),
+                  },
+                },
+                y: {
+                  stacked: true,
+                  beginAtZero: true,
+                  grace: '20%',
+                  title: {
+                    display: false,
+                  },
+                  ticks: {
+                    color: getTextColor(),
+                  },
+                },
+              },
+              animation: {
+                duration: 1000,
+                easing: 'easeOutBounce',
+              },
+            },
+            plugins: [
+              {
+                afterDatasetsDraw: drawSumAboveBar, // Применяем функцию для отображения суммы
+              },
+            ],
+          });
+        }
+      } catch (error) {
+        console.error('Ошибка при загрузке данных:', error.message);
+        alert('Не удалось загрузить данные. Попробуйте позже.');
+      } finally {
+        isLoading.value = false;
+        isUpdating.value = false;
+      }
+    };
+
+    const closeModal = () => {
+      selectedWeek.value = null;
+    };
+
+    const getProjectColor = (projectName) => {
+      const projectColors = {
+        'МСП ЯНАО-89': 'rgba(144, 238, 144, 0.6)',
+        'МФЦ Томск-70': 'rgba(173, 216, 230, 0.6)',
+        'МФЦ ЯНАО-89': 'rgba(255, 182, 193, 0.6)',
+        'МФЦ Приморье-25': 'rgba(255, 239, 213, 0.6)',
+        'МФЦ ЧАО-87': 'rgba(221, 160, 221, 0.6)',
+        'МФЦ Камчатка-41': 'rgba(240, 230, 140, 0.6)',
+        'МФЦ Тула-71': 'rgba(250, 218, 221, 0.6)',
+        'Внутренние задачи': 'rgba(200, 200, 200, 0.6)',
+        'СПЛП ЯНАО-89': 'rgba(204, 229, 255, 0.6)',
+      };
+      return projectColors[projectName] || 'rgba(211, 211, 211, 0.6)';
+    };
+
+    const toggleTheme = async () => {
+      isUpdating.value = true; // Включаем лоадер
+      overlayVisible.value = true; // Делаем оверлей видимым
+      isDarkMode.value = !isDarkMode.value;
+
+      try {
+        await fetchData(); // Перезагрузка графиков
+      } catch (error) {
+        console.error('Ошибка при обновлении данных:', error);
+      } finally {
+        isUpdating.value = false; // Выключаем лоадер
+        overlayVisible.value = false; // Скрываем оверлей
+      }
+    };
+
+    const handleAnimationEnd = () => {
+      if (!isUpdating.value) {
+        overlayVisible.value = false; // Убираем оверлей из DOM
+      }
+    };
+
+    const destroyChart = (chartInstance) => {
+      if (chartInstance) {
+        chartInstance.destroy();
+        chartInstance = null;
+      }
+    };
+ 
+    const switchTab = async (tab) => {
+      isUpdating.value = true; // Включаем лоадер
+      overlayVisible.value = true; // Делаем оверлей видимым
+      currentTab.value = tab;
+
+      if (tab === 'charts') {
+        try {
+          await fetchData(); // Повторный вызов fetchData при переключении на вкладку "Графики"
+        } catch (error) {
+          console.error('Ошибка при загрузке данных:', error);
+        } finally {
+          isUpdating.value = false; // Выключаем лоадер
+          overlayVisible.value = false; // Скрываем оверлей
+        }
+      } else {
+        isUpdating.value = false; // Выключаем лоадер
+        overlayVisible.value = false; // Скрываем оверлей
+      }
+    };
+
+    onMounted(() => {
+      fetchData();
+    });
+
+    onUnmounted(() => {
+      destroyChart(chartInstance.value);
+      destroyChart(closedChartInstance.value);
+      destroyChart(inProgressChartInstance.value);
+    });
+
     return {
-      tasks: [],
-      newTask: '',
+      currentTab, // Возвращаем состояние текущей вкладки
+      isLoading,
+      issuesChart,
+      closedChart,
+      inProgressChart,
+      selectedWeek,
+      weeklyDetails,
+      closeModal,
+      isDarkMode,
+      toggleTheme,
+      isUpdating,
+      overlayVisible, // Возвращаем новое состояние
+      handleAnimationEnd,
+      switchTab,
     };
   },
-  mounted() {
-    this.loadTasks();
-  },
-  methods: {
-    async loadTasks() {
-      const response = await axios.get('/api/tasks');
-      this.tasks = response.data;
-    },
-    async addTask() {
-      if (!this.newTask.trim()) return;
-
-      await axios.post('/api/tasks', { title: this.newTask });
-      this.newTask = '';
-      this.loadTasks();
-    },
-    async deleteTask(id) {
-      await axios.delete(`/api/tasks/${id}`);
-      this.loadTasks();
-    }
-  }
-};
+});
 </script>
 
-<style scoped>
-/* Основные стили */
-:root {
-  --primary-color: #6366f1;
-  --primary-hover: #4f46e5;
-  --danger-color: #ef4444;
-  --danger-hover: #dc2626;
-  --success-color: #10b981;
-  --success-hover: #059669;
-  --text-color: #1f2937;
-  --text-light: #6b7280;
-  --bg-color: #f9fafb;
-  --card-bg: #ffffff;
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.1);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --transition: all 0.2s ease-in-out;
+<style>
+body {
+  margin: 0;
+  padding: 0;
+  background: linear-gradient(135deg, #f5f7fa, #e6f0ff);
 }
 
-* {
-  box-sizing: border-box;
+.dashboard {
+  display: flex;
+  min-height: 100vh;
+  background: #f5f7fa;
+}
+
+.dashboard.dark {
+  background: #2c3e50;
+}
+
+.sidebar {
+  width: 220px;
+  background: #e3e9f7;
+  box-shadow: 2px 0 8px rgba(0,0,0,0.05);
+  padding: 18px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  border-radius: 0 12px 12px 0;
+  position: sticky;      
+  top: 0;                
+  height: 100vh;         
+  z-index: 10;
+  overflow-y: auto;
+}
+
+.sidebar.dark {
+  background: #34495e;
+}
+
+.sidebar h2 {
+  font-size: 18px;
+  margin-bottom: 16px;
+  color: #2c3e50;
+  font-weight: bold;
+}
+
+.sidebar h2.dark {
+  color: #ecf0f1; /* Цвет для тёмной темы */
+}
+
+.sidebar ul {
+  list-style: none;
+  padding: 0;
+  width: 100%;
+}
+
+.sidebar li {
+  margin-bottom: 10px;
+}
+
+.sidebar a {
+  color: #2c3e50;
+  text-decoration: none;
+  font-size: 15px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  display: block;
+  transition: background 0.2s;
+}
+
+.sidebar a:hover {
+  background: #dbe6f3;
+}
+
+.sidebar.dark a {
+  color: #ecf0f1;
+}
+
+.sidebar.dark a:hover {
+  background: #3b5998;
+}
+
+.theme-toggle {
+  margin-top: auto;
+  padding: 12px 20px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: bold;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+  transition: background 0.3s, transform 0.2s, box-shadow 0.2s;
+}
+
+.theme-toggle.light {
+  background: #34495e;
+  color: #fff;
+}
+
+.theme-toggle.light:hover {
+  background: #34495e;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+}
+
+.theme-toggle.dark {
+  background: #ecf0f1;
+  color: #34495e;
+}
+
+.theme-toggle.dark:hover {
+  background: #ecf0f1;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+}
+
+.theme-toggle:active {
+  transform: translateY(0);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.dashboard.dark .theme-toggle {
+  --button-bg: #34495e;
+  --button-hover-bg: #2c3e50;
+  --button-text: #ecf0f1;
+}
+
+.dashboard.light .theme-toggle {
+  --button-bg: #007bff;
+  --button-hover-bg: #0056b3;
+  --button-text: #fff;
+}
+
+.main-content {
+  flex: 1;
+  padding: 24px 24px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 18px;
+}
+
+.dashboard-header {
+  margin-bottom: 18px;
+  text-align: left;
+}
+
+.dashboard-header h1 {
+  font-size: 24px;
+  font-weight: bold;
+  color: #2c3e50;
   margin: 0;
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.04);
+}
+
+.block {
+  border-radius: 10px;
+  padding: 16px 14px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  margin-bottom: 0;
+  gap: 8px;
+}
+
+.block h2 {
+  font-size: 16px;
+  color: #3a3a3a;
+  margin-bottom: 10px;
+  text-align: left;
+  font-weight: 600;
+}
+
+.chart-container {
+  width: 100%;
+  height: 420px; 
+  border-radius: 6px;
+  padding: 8px;
+  margin: 0;
+}
+
+canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.loading {
+  font-size: 15px;
+  color: #666;
+  text-align: center;
+  margin-top: 10px;
+}
+
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(44, 62, 80, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.2s;
+}
+
+.modal-content {
+  background: #fff;
+  box-shadow: 0 4px 32px rgba(0,0,0,0.12);
+  padding: 28px 32px;
+  border-radius: 14px;
+  width: 50%;
+  min-height: 50%;
+  position: relative;
+  animation: slideIn 0.2s;
+}
+
+.modal-content h2 {
+  color: #222;
+  font-size: 22px;
+  font-weight: bold;
+  margin-bottom: 18px;
+}
+
+.modal-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 20px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+}
+
+ul {
+  list-style-type: none;
   padding: 0;
 }
 
-body {
-  background-color: var(--bg-color);
+li {
+  margin: 4px 0;
+  font-size: 15px;
+  color: #6c757d;
 }
 
-.app {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-  max-width: 800px;
-  margin: 0 auto; /* Горизонтальное центрирование */
-  min-height: 100vh;
+.loader-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.5);
   display: flex;
-  flex-direction: column;
-  width: 100%;
-}
-
-/* Шапка */
-.header {
-  background: linear-gradient(135deg, var(--primary-color), #8b5cf6);
-  color: white;
-  padding: 2rem 0;
-  box-shadow: var(--shadow-md);
-  margin-bottom: 2rem;
-}
-
-.header-content {
-  max-width: 800px;
-  width: 100%;
-  margin: 0 auto;
-  padding: 0 2rem;
-}
-
-.header h1 {
-  font-size: 2.25rem;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.header .icon {
-  font-size: 2rem;
-}
-
-.task-counter {
-  font-size: 1.125rem;
-  color: rgba(255, 255, 255, 0.9);
-}
-
-.task-count {
-  font-weight: 700;
-  color: white;
-}
-
-/* Основное содержимое */
-.content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center; /* Центрирование дочерних элементов */
-  padding: 0 2rem;
-  width: 100%;
-}
-
-.task-form-container {
-  width: 100%;
-  max-width: 600px; /* Ограничение ширины формы */
-}
-
-.task-form {
-  display: flex;
-  gap: 1rem;
-}
-
-.task-input {
-  flex: 1;
-  padding: 0.875rem 1.25rem;
-  border: 1px solid #e5e7eb;
-  border-radius: var(--radius-md);
-  font-size: 1rem;
-  transition: var(--transition);
-  box-shadow: var(--shadow-sm);
-}
-
-.task-input:focus {
-  outline: none;
-  border-color: var(--primary-color);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
-}
-
-/* Кнопки */
-.btn {
-  display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
-  padding: 0.875rem 1.5rem;
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: 1rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: var(--transition);
-  box-shadow: var(--shadow-sm);
+  z-index: 1000;
+  animation: fadeIn 0.3s ease-out; /* Анимация появления */
 }
 
-.btn-add {
-  background-color: var(--success-color);
-  color: white;
+.loader-overlay.hidden {
+  animation: fadeOut 0.3s ease-in; /* Анимация исчезновения */
+  pointer-events: none; /* Убираем блокировку */
+  opacity: 0; /* Устанавливаем прозрачность */
+  visibility: hidden; /* Скрываем элемент */
 }
 
-.btn-add:hover {
-  background-color: var(--success-hover);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
+/* HTML: <div class="loader"></div> */
+.loader {
+  height: 80px;
+  aspect-ratio: 1;
+  box-sizing: border-box;
+  position: relative;
+  mask: 
+    radial-gradient(#0000 47%,#000 48% 71%,#0000 72%) exclude,
+    conic-gradient(#000 0 0) no-clip;
+  animation: l11 1.5s linear infinite;
 }
-
-.btn-delete {
-  background-color: var(--danger-color);
-  color: white;
+.loader:before {
+  content: "";
+  position: absolute;
+  inset: 0 35% 70%;
+  border-radius: 50%;
+  background: #000;
+  filter: blur(15px);
 }
-
-.btn-delete:hover {
-  background-color: var(--danger-hover);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
-}
-
-.btn-icon {
-  font-size: 1.1rem;
-}
-
-.btn-text {
-  display: inline-block;
-}
-
-/* Список задач */
-.tasks-container {
-  width: 100%;
-  max-width: 600px; /* Ограничение ширины списка задач */
-}
-
-.task-card {
-  background-color: var(--card-bg);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  margin-bottom: 1rem;
-  overflow: hidden;
-  transition: var(--transition);
-}
-
-.task-card:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md);
-}
-
-.task-content {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1.25rem 1.5rem;
-}
-
-.task-text {
-  font-size: 1.125rem;
-  font-weight: 500;
-  flex: 1;
-}
-
-/* Состояние "нет задач" */
-.no-tasks {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 300px;
-}
-
-.empty-state {
-  text-align: center;
-  color: var(--text-light);
-}
-
-.empty-icon {
-  font-size: 4rem;
-  margin-bottom: 1rem;
-  opacity: 0.5;
-}
-
-.empty-state h3 {
-  font-size: 1.5rem;
-  font-weight: 600;
-  margin-bottom: 0.5rem;
-  color: var(--text-color);
-}
-
-.empty-state p {
-  font-size: 1rem;
-}
-
-/* Анимации */
-.task-list-enter-active,
-.task-list-leave-active {
-  transition: all 0.5s ease;
-}
-.task-list-enter-from,
-.task-list-leave-to {
-  opacity: 0;
-  transform: translateX(30px);
-}
-.task-list-move {
-  transition: transform 0.5s ease;
+@keyframes l11 {
+  to {rotate: 1turn}
 }
 
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateY(10px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
-/* Адаптивность */
-@media (max-width: 640px) {
-  .header-content {
-    flex-direction: column;
-    gap: 0.5rem;
-    text-align: center;
+@keyframes fadeOut {
+  from {
+    opacity: 1;
   }
-  
-  .task-form {
-    flex-direction: column;
+  to {
+    opacity: 0;
   }
-  
-  .btn-text {
-    display: none;
+}
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    width: 100%;
+    position: relative;
+    height: auto;
+  }
+
+  .main-content {
+    padding: 12px;
+  }
+
+  .chart-container {
+    height: 300px;
   }
 }
 </style>
