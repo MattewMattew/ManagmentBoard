@@ -13,6 +13,7 @@
         <li><a href="#" @click.prevent="switchTab('charts')">Графики</a></li>
         <li><a href="#" @click.prevent="switchTab('reports')">Отчёты</a></li>
         <li><a href="#" @click.prevent="switchTab('settings')">Настройки</a></li>
+        <li><a href="#" @click.prevent="switchTab('team')">Команда</a></li>
       </ul>
     </aside>
     <main class="main-content">
@@ -20,26 +21,52 @@
         <h1 v-if="currentTab === 'charts'">График поступления задач</h1>
         <h1 v-if="currentTab === 'reports'">Отчёты</h1>
         <h1 v-if="currentTab === 'settings'">Настройки</h1>
+        <h1 v-if="currentTab === 'team'">Команда</h1>
       </header>
       <div v-if="isLoading" class="loading">
         <p>Загрузка данных...</p>
       </div>
-      <!-- Графики отображаются только на вкладке "Графики" -->
+      <!-- Графики в пользовательском порядке и только включённые -->
       <section v-if="currentTab === 'charts'" class="block">
-        <div class="chart-container">
-          <canvas ref="issuesChart"></canvas>
-        </div>
-        <div class="chart-container">
-          <canvas ref="closedChart"></canvas>
-        </div>
-        <div class="chart-container">
-          <canvas ref="inProgressChart"></canvas>
-        </div>
+        <template v-for="chart in chartOrder" :key="chart">
+          <div
+            v-if="chartEnabled[chart]"
+            :class="['chart-container', chart]"
+          >
+            <canvas
+              v-if="chart === 'issues'"
+              :ref="setIssuesChart"
+            ></canvas>
+            <canvas
+              v-else-if="chart === 'closed'"
+              :ref="setClosedChart"
+            ></canvas>
+            <canvas
+              v-else-if="chart === 'inProgress'"
+              :ref="setInProgressChart"
+            ></canvas>
+          </div>
+        </template>
       </section>
+      
       <!-- Вкладка "Настройки" -->
       <section v-if="currentTab === 'settings'" class="block">
-        <Settings :isDarkMode="isDarkMode" :toggleTheme="toggleTheme" />
+        <Settings
+          :isDarkMode="isDarkMode"
+          :toggleTheme="toggleTheme"
+          :chartOrder="chartOrder"
+          :setChartOrder="setChartOrder"
+          :chartEnabled="chartEnabled"
+          :setChartEnabled="setChartEnabled"
+          :projectColors="projectColors"
+          :setProjectColor="setProjectColor"
+          :projectAlpha="projectAlpha"
+          :setProjectAlpha="setProjectAlpha"
+          :projectList="projectList"
+        />
       </section>
+      <!-- Вкладка "Команда" -->
+      <Team v-if="currentTab === 'team'" :isDarkMode="isDarkMode" />
       <!-- Модальное окно -->
       <div v-if="selectedWeek" class="modal" @click.self="closeModal">
         <div class="modal-content">
@@ -64,10 +91,11 @@
 </template>
 
 <script>
-import { defineComponent, ref, onMounted, onUnmounted } from 'vue';
+import { defineComponent, ref, onMounted, onUnmounted, watch } from 'vue';
 import axios from 'axios';
 import moment from 'moment';
-import Settings from './components/Settings.vue'; // Добавляем компонент "Настройки"
+import Settings from './components/Settings.vue';
+import Team from './components/Team.vue';
 import {
   Chart,
   BarController,
@@ -95,25 +123,98 @@ Chart.register(
   PointElement
 );
 
+const SETTINGS_KEY = 'settings.json';
+
+// Функция для работы с settings.json в localStorage
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return {
+    isDarkMode: false,
+    chartOrder: ['issues', 'closed', 'inProgress'],
+    chartEnabled: {
+      issues: true,
+      closed: true,
+      inProgress: true,
+    },
+  };
+}
+function saveSettings(settings) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
 export default defineComponent({
   name: 'App',
   components: {
-    Settings, // Регистрируем компонент "Настройки"
+    Settings,
+    Team,
   },
   setup() {
-    const currentTab = ref('charts'); // Добавляем состояние для текущей вкладки
+    // --- Настройки пользователя ---
+    const userSettings = ref(loadSettings());
+
+    // Реактивные состояния на основе настроек
+    const isDarkMode = ref(userSettings.value.isDarkMode);
+    const chartOrder = ref([...userSettings.value.chartOrder]);
+    const chartEnabled = ref({ ...userSettings.value.chartEnabled });
+    const defaultProjectColors = {
+      'МСП ЯНАО-89': '#90ee90',
+      'МФЦ Томск-70': '#add8e6',
+      'МФЦ ЯНАО-89': '#ffb6c1',
+      'МФЦ Приморье-25': '#ffefd5',
+      'МФЦ ЧАО-87': '#dda0dd',
+      'МФЦ Камчатка-41': '#f0e68c',
+      'МФЦ Тула-71': '#fadadd',
+      'Внутренние задачи': '#c8c8c8',
+      'СПЛП ЯНАО-89': '#cce5ff',
+    };
+    const defaultProjectAlpha = 0.6;
+    const projectColors = ref({...defaultProjectColors, ...(userSettings.value.projectColors || {})});
+    const projectAlpha = ref({...userSettings.value.projectAlpha || {}});
+    const projectList = ref([
+      'МСП ЯНАО-89',
+      'МФЦ Томск-70',
+      'МФЦ ЯНАО-89',
+      'МФЦ Приморье-25',
+      'МФЦ ЧАО-87',
+      'МФЦ Камчатка-41',
+      'МФЦ Тула-71',
+      'Внутренние задачи',
+      'СПЛП ЯНАО-89',
+    ]);
+
+    // Сохраняем настройки при изменении
+    watch([isDarkMode, chartOrder, chartEnabled], () => {
+      userSettings.value.isDarkMode = isDarkMode.value;
+      userSettings.value.chartOrder = chartOrder.value;
+      userSettings.value.chartEnabled = chartEnabled.value;
+      saveSettings(userSettings.value);
+    }, { deep: true });
+    watch([projectColors, projectAlpha], () => {
+      userSettings.value.projectColors = projectColors.value;
+      userSettings.value.projectAlpha = projectAlpha.value;
+      saveSettings(userSettings.value);
+    }, { deep: true });
+
+    const currentTab = ref('charts');
     const isLoading = ref(true);
     const issuesChart = ref(null);
     const closedChart = ref(null);
     const inProgressChart = ref(null);
+
+    function setIssuesChart(el) { issuesChart.value = el; }
+    function setClosedChart(el) { closedChart.value = el; }
+    function setInProgressChart(el) { inProgressChart.value = el; }
+
     const chartInstance = ref(null);
     const closedChartInstance = ref(null);
     const inProgressChartInstance = ref(null);
     const selectedWeek = ref(null);
     const weeklyDetails = ref({});
-    const isDarkMode = ref(false);
-    const isUpdating = ref(false); // Новое состояние для лоадера
-    const overlayVisible = ref(false); // Новое состояние для управления видимостью оверлея
+    const isUpdating = ref(false);
+    const overlayVisible = ref(false);
 
     const getTextColor = () => (isDarkMode.value ? '#ecf0f1' : '#333');
 
@@ -565,29 +666,54 @@ export default defineComponent({
     };
 
     const getProjectColor = (projectName) => {
-      const projectColors = {
-        'МСП ЯНАО-89': 'rgba(144, 238, 144, 0.6)',
-        'МФЦ Томск-70': 'rgba(173, 216, 230, 0.6)',
-        'МФЦ ЯНАО-89': 'rgba(255, 182, 193, 0.6)',
-        'МФЦ Приморье-25': 'rgba(255, 239, 213, 0.6)',
-        'МФЦ ЧАО-87': 'rgba(221, 160, 221, 0.6)',
-        'МФЦ Камчатка-41': 'rgba(240, 230, 140, 0.6)',
-        'МФЦ Тула-71': 'rgba(250, 218, 221, 0.6)',
-        'Внутренние задачи': 'rgba(200, 200, 200, 0.6)',
-        'СПЛП ЯНАО-89': 'rgba(204, 229, 255, 0.6)',
-      };
-      return projectColors[projectName] || 'rgba(211, 211, 211, 0.6)';
+      const color = projectColors.value[projectName] || defaultProjectColors[projectName] || '#d3d3d3';
+      const alpha = projectAlpha.value[projectName] ?? defaultProjectAlpha;
+      // Преобразуем hex в rgba
+      const hex = color.replace('#', '');
+      const bigint = parseInt(hex, 16);
+      const r = (bigint >> 16) & 255;
+      const g = (bigint >> 8) & 255;
+      const b = bigint & 255;
+      return `rgba(${r},${g},${b},${alpha})`;
     };
 
-    const toggleTheme = async () => {
-      isUpdating.value = true; // Включаем лоадер
-      overlayVisible.value = true; // Делаем оверлей видимым
-      isDarkMode.value = !isDarkMode.value;
+    const setProjectColor = (project, color) => {
+      projectColors.value = { ...projectColors.value, [project]: color };
+    };
+    const setProjectAlpha = (project, alpha) => {
+      projectAlpha.value = { ...projectAlpha.value, [project]: alpha };
+    };
 
+    // --- Новая функция для изменения порядка графиков ---
+    const setChartOrder = (newOrder) => {
+      chartOrder.value = [...newOrder];
+    };
+
+    // --- Новая функция для включения/отключения графиков ---
+    const setChartEnabled = (key, enabled) => {
+      chartEnabled.value = { ...chartEnabled.value, [key]: enabled };
+    };
+
+    // --- Обновляем toggleTheme для сохранения в настройках ---
+    const toggleTheme = async () => {
+      isUpdating.value = true;
+      overlayVisible.value = true;
+      isDarkMode.value = !isDarkMode.value;
       try {
-        await fetchData(); // Перезагрузка графиков
+        await fetchData();
       } catch (error) {
         console.error('Ошибка при обновлении данных:', error);
+      } finally {
+        isUpdating.value = false;
+        overlayVisible.value = false;
+      }
+    };
+
+    const fetchDataAndHandleErrors = async () => {
+      try {
+        await fetchData();
+      } catch (error) {
+        console.error('Ошибка при загрузке данных:', error);
       } finally {
         isUpdating.value = false; // Выключаем лоадер
         overlayVisible.value = false; // Скрываем оверлей
@@ -638,7 +764,7 @@ export default defineComponent({
     });
 
     return {
-      currentTab, // Возвращаем состояние текущей вкладки
+      currentTab,
       isLoading,
       issuesChart,
       closedChart,
@@ -649,9 +775,21 @@ export default defineComponent({
       isDarkMode,
       toggleTheme,
       isUpdating,
-      overlayVisible, // Возвращаем новое состояние
+      overlayVisible,
       handleAnimationEnd,
       switchTab,
+      chartOrder,
+      setChartOrder,
+      chartEnabled,
+      setChartEnabled,
+      setIssuesChart,
+      setClosedChart,
+      setInProgressChart,
+      projectColors,
+      setProjectColor,
+      projectAlpha,
+      setProjectAlpha,
+      projectList,
     };
   },
 });
@@ -826,6 +964,15 @@ body {
   margin-bottom: 10px;
   text-align: left;
   font-weight: 600;
+}
+
+.block.dark {
+  background: #34495e;
+  color: #ecf0f1;
+}
+.block.dark h2,
+.block.dark li {
+  color: #ecf0f1;
 }
 
 .chart-container {
